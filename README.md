@@ -1,6 +1,25 @@
 # magepov
 Magento EAV Attribute Inspector. Command line utility to inspect a few attributes from a few entities (only products by now)
 
+## How to install
+
+Just copy the magepov script to a directory in PATH. 
+
+A good choice is to copy it to ~/bin. Ensure ~/bin is in system PATH and the script has execution permissions.
+
+```sh
+mkdir -p ~/bin && wget -qO ~/bin/magepov https://raw.githubusercontent.com/manelio/magepov/master/magepov && chmod +x ~/bin/magepov
+```
+
+or
+
+```sh
+mkdir -p ~/bin && curl -so ~/bin/magepov https://raw.githubusercontent.com/manelio/magepov/master/magepov && chmod +x ~/bin/magepov
+```
+
+You can also copy the script to Magento shell directory, and invoke it as any other shell script: php shell/magepov (from Magento root).
+
+
 ```sh
 $ magepov
 Magento EAV Attribute Inspector.
