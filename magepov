@@ -1,0 +1,503 @@
+#!/usr/bin/php
+<?php
+function locateFile($file, $directory)
+{
+  if (is_file($directory)) $directory = dirname($directory);
+  if ($directory[strlen($directory) - 1] != '/') $directory .= '/';
+
+  while($directory && !file_exists($test = $directory.$file)) {    
+    $parent = dirname($directory);
+    if ($directory == $parent) break;
+    $directory = $parent;
+  }
+  if (!file_exists($test)) return false;
+  return $test;
+}
+
+$abstractPhp = locateFile('shell/abstract.php', getcwd());
+
+if (!$abstractPhp) {
+  $abstractPhp = locateFile('shell/abstract.php', __FILE__);
+}
+
+if (!$abstractPhp) {
+  die('[EE] Not found a Magento installation. You have to run this script from a directory containing a Magento installation.\n');
+}
+
+require_once( $abstractPhp );
+class Miox_Shell_MagePov extends Mage_Shell_Abstract
+{
+  protected $backendValueTables = array();
+  protected $hasPerStoreValues = false;
+
+  public function run()
+  {
+    error_reporting(E_ALL);
+    ini_set('display_errors', 1);
+
+    $this->init();
+
+    echo <<<EOT
+Magento EAV Attribute Inspector.
+Command line utility to inspect a few attributes from a few entities (only products by now)
+Start typing some attributes and SKUs or product IDs. Use + at the end of SKU or ID to add child products.
+
+EOT;
+
+    $ex = $this->getExample();
+    if (empty($ex)) {
+      echo "Hmmm. It seems you have no products\n";
+    } else {
+      echo "Ex: ";
+      echo implode(" ", $ex);
+      echo " ";
+      echo "price special_price status";
+    }
+    echo "\n";
+    echo "\n";
+
+    if (function_exists('readline')) {    
+      $historyFile = $_SERVER['HOME'].'/.magepov_history';
+      if (is_file($historyFile)) readline_read_history($historyFile);
+    }
+
+    $stores = Mage::app()->getStores(true);
+
+    $attributes = array();
+    $entities = array();
+    $allEntities = array();
+
+    while(true) {
+      $show = true;
+
+      if (function_exists('readline')) {
+        $line = trim(readline('% '));  
+      } else {
+        echo '% ';
+        $line = trim(fgets(STDIN));
+      }
+      $tokens = preg_split("/[\s,]+/", $line);
+
+      if (function_exists('readline') && !empty($line)) {
+        readline_add_history($line);
+        if (readline_write_history($historyFile)) {
+          if (function_exists('readline_list_history')) {
+            $history = readline_list_history();
+            if (($historySize = count($history)) > $_SERVER['HISTSIZE']) {
+              $history = array_slice($history, $historySize - $_SERVER['HISTSIZE']);            
+              file_put_contents($historyFile, implode("\n",$history));
+            }
+          }
+        }        
+      }
+
+      foreach($tokens as $token) {
+        if ($token[0] == ':') {
+          $command = substr($token, 1);
+          switch ($command) {
+            case 'c':
+              $attributes = array();
+              $entities = array();
+              $allEntities = array();
+              $show = false;
+              break;
+          }
+        }
+        else if (array_key_exists($token, $this->attributesByCode)) {
+          $attributeId = $this->attributesByCode[$token]->getAttributeId();
+          if (!in_array($attributeId, $attributes)) $attributes[] = $attributeId;        
+        } else if (!empty($token)) {
+          if ($token[strlen($token) - 1] == '+') {
+            $includeChildren = true;
+            $token = substr($token, 0, strlen($token) - 1);            
+          }
+          list($entityId, $sku) = $this->checkId($token);
+
+          if (!$entityId) continue;          
+          $allEntities[$entityId] = $sku;
+          $entities[$entityId] = array();
+          if ($includeChildren) {
+            $childrenIds = Mage::getModel('catalog/product_type_configurable')->getChildrenIds($entityId);
+            $childrenIds = reset($childrenIds);
+            $entities[$entityId] = $childrenIds;
+            foreach($childrenIds as $childrenId) {
+              list($aux, $sku) = $this->checkId($childrenId);
+              $allEntities[$childrenId] = $sku;
+            }            
+          }
+        }
+      } 
+
+      if (!empty($line)) {
+        $rows = array();      
+        $values = $this->getValues(array_keys($allEntities), $attributes, 'all');        
+
+        $row = array();
+        $row['sku'][0] = '';
+        $row0 = array();
+        $row0['sku'][0] = '';
+
+        foreach($attributes as $attributeId) {          
+          $first = true;
+          $attributeCode = $this->attributesById[$attributeId]->getAttributeCode();
+          foreach($stores as $store) {
+            $storeCode = $store->getCode();
+            $storeId = $store->getStoreId();
+
+            if ($first) {
+              $row0[$attributeCode][$storeCode] = "|$attributeCode";
+              $first = false;
+            } else {
+              $row0[$attributeCode][$storeCode] = '';
+            }
+
+            $content = $storeCode;
+            $row[$attributeCode][$storeCode] = $content;
+          }
+        }
+
+        $rows[] = $row0;
+        $rows[] = $row;
+        $rows[] = 'line';
+
+        foreach($allEntities as $entityId => $sku) {
+          $row = array();
+          $row['sku'][0] = $sku;
+          foreach($attributes as $attributeId) {
+            $attributeCode = $this->attributesById[$attributeId]->getAttributeCode();
+            foreach($stores as $store) {
+              $storeCode = $store->getCode();
+              $storeId = $store->getStoreId();
+
+              $value = null;
+              if (array_key_exists($entityId, $values)) {
+                if (array_key_exists($attributeId, $values[$entityId])) {
+                  if (array_key_exists($storeId, $values[$entityId][$attributeId])) {
+                    $value = $values[$entityId][$attributeId][$storeId];
+                  } else if (array_key_exists(0, $values[$entityId][$attributeId])) {
+                    $value = "{".$values[$entityId][$attributeId][0]."}";
+                  } else {
+                    $value = 'ERR';
+                  }
+                }
+              }
+              $row[$attributeCode][$storeCode] = $value;
+            }
+          }
+          $rows[] = $row;
+        }
+
+        if ($show) {
+          echo "\n";
+          $this->show($rows);
+          echo "\n";
+        }
+
+      }
+
+      if ($line == 'exit') break;
+    }
+  }
+
+  public function init()
+  {
+    $entityTypeObj = Mage::getModel('eav/config')->getEntityType('catalog_product');
+    $entityTable = $entityTypeObj->getEntityTable();
+    $entityTableName = Mage::getSingleton('core/resource')->getTableName($entityTable);
+
+    $this->entityTableName = $entityTableName;
+
+    $conn = Mage::getSingleton('core/resource')->getConnection('core_read');
+
+    $additionalAttributeTable = $entityTypeObj->getAdditionalAttributeTable();
+    if ($additionalAttributeTable) {
+      $additionalAttributeTableName = Mage::getSingleton('core/resource')->getTableName($additionalAttributeTable);
+      if ($conn->isTableExists($additionalAttributeTableName)) {
+        $attributeFields = $conn->describeTable($additionalAttributeTableName);        
+        $this->hasPerStoreValues = array_key_exists('is_global', $attributeFields);
+      }
+    }
+
+    $entityAttributeCollection = $entityTypeObj->getEntityAttributeCollection();
+    $attributes = Mage::getResourceModel($entityAttributeCollection)->setEntityTypeFilter($entityTypeObj);
+
+    foreach($attributes as $attribute) {
+      $attributeCode = $attribute->getAttributeCode();
+      if (array_key_exists($attributeCode, $this->attributes)) continue;
+
+      $attributeId = $attribute->getAttributeId();
+      $backendType = $attribute->getBackendType();
+      $backendModel = $attribute->getBackendModel();
+      $frontendInput = $attribute->getFrontendInput();
+      $sourceModel = $attribute->getSourceModel();
+
+      $this->attributeCodesById[$attributeId] = $attributeCode;
+
+      $backend = null;
+      if ($backendType == 'varchar' && $frontendInput == 'multiselect') {
+        $backend = 'varchar/multiselect';
+      } else if ($backendType == 'int' && $frontendInput == 'select' && (empty($sourceModel) || $sourceModel == 'eav/entity_attribute_source_table')) {
+        $backend = 'int/select';
+      } else if ($backendModel == 'catalog/product_attribute_backend_media') {
+        $backend = 'media_gallery';
+      } else {
+        $backend = $backendType;
+      }
+
+      if (!array_key_exists($backend, $this->backendValueTables)) {
+        if ($backend == 'media_gallery') $suffix = $backend;
+        else $suffix = $backendType;
+        
+        if ($backend == 'static') $valueTable = null;
+        else $valueTable = $entityTableName."_".$suffix;
+
+        $this->backendValueTables[$backend] = $valueTable;
+      } 
+      
+      if (!array_key_exists($backend, $this->attributesByBackend)) $this->attributesByBackend[$backend] = array();
+      if (!array_key_exists($attributeCode, $this->attributesByBackend[$backend])) $this->attributesByBackend[$backend][$attributeCode] = $attributeId;
+      $this->backendByAttributeId[$attributeId] = $backend;
+
+      $this->attributesByCode[$attributeCode] = $attribute;
+      $this->attributesById[$attributeId] = $attribute;
+    }
+
+  }
+
+
+  public function getValues($entityId, $attributes = null, $storeId = null)
+  {
+    if (!is_array($entityId)) $entityId = array($entityId);
+
+    if (is_numeric($storeId)) {
+      $storeCondition = "store_id = '$storeId'";
+    } else if (is_array($storeId)) {
+      $storeCondition = "store_id IN (".implode(',', $storeId).")";
+    } else if (is_string($storeId) && $storeId == 'stores') {
+      $storeCondition = "store_id > 0";
+    } else if (is_string($storeId) && $storeId == 'all') {
+      $storeCondition = "1 = 1";
+    } else {
+      $storeCondition = "1 = 1";
+    }
+
+    if (is_null($attributes)) {
+      $attributesCondition = "1 = 1";
+    } else {
+      if (is_array($attributes)) {
+        if (empty($attributes)) {
+          $attributesCondition = "attribute_id IN (NULL)";
+        } else {
+          $attributeIds = implode(', ', $attributes);
+          $attributesCondition = "attribute_id IN ($attributeIds)";
+        }
+      }
+    }
+
+    if (is_array($entityId)) {
+      if (empty($entityId)) $entityId = array("NULL");
+      $entityId = implode(', ', $entityId);
+    }
+
+    $conn = Mage::getSingleton('core/resource')->getConnection('core_read');
+
+    $values = array();
+
+    // static attributes
+    $query = <<<EOT
+SELECT * FROM {$this->entityTableName} WHERE entity_id IN ($entityId)
+EOT;
+
+    $results = $conn->fetchAll($query);
+
+    foreach($results as $result) {
+
+    }
+
+    $tablesQueried = array();
+
+    foreach($this->backendValueTables as $backend => $valueTable) {
+      if (in_array($valueTable, $tablesQueried)) continue;
+      $tablesQueried[] = $valueTable;
+
+      if (!$valueTable) continue;
+      if ($backend == 'media_gallery') continue;
+      
+      if ($this->hasPerStoreValues) {
+        $query = <<<EOT
+SELECT entity_id, attribute_id, store_id, value FROM $valueTable
+WHERE entity_id IN ($entityId) AND $attributesCondition AND $storeCondition
+EOT;
+      } else {
+        $query = <<<EOT
+SELECT entity_id, attribute_id, 0 as store_id, value FROM $valueTable
+WHERE entity_id IN ($entityId) AND $attributesCondition
+EOT;
+      }
+
+      $results = $conn->fetchAll($query);
+
+      foreach($results as $result) {
+        $attributeId = $result['attribute_id'];
+        $value = $result['value'];
+
+        $backend = $this->backendByAttributeId[$attributeId];
+        if ($value && $backend == 'int/select') {
+          $value = $this->getOptionValue($attributeId, $value);
+        } else if ($value && $backend == 'varchar/multiselect') {
+          $value = $this->getOptionValue($attributeId, $value, false);
+        } else if ($value && $backend == 'decimal') {
+          $value = sprintf("%.2f", $value);
+        }
+
+        if ($this->hasPerStoreValues) {
+          $values[$result['entity_id']][$result['attribute_id']][$result['store_id']] = $value;
+        }
+        else {
+          $values[$result['entity_id']][$result['attribute_id']] = $value;
+        }
+      }
+
+      
+    }
+
+    return $values;
+  }
+
+  public function getOptionValue($attributeId, $value, $single = true)
+  {
+    $attributeOptions = $this->getAttributeOptions($attributeId);
+    if ($single) {
+      if (array_key_exists($value, $attributeOptions)) return $attributeOptions[$value];
+      else {
+        //echo "[WW] option $value not found for attribute $attributeId\n";
+        return "#OPTION-$value-$attributeId";
+      }
+    } else {
+      $result = array();
+      $values = explode(",", $value);
+      foreach($values as $value) {
+        if (array_key_exists($value, $attributeOptions)) $result[] = $attributeOptions[$value];
+        else {
+          //echo "[WW] option $value not found for attribute $attributeId\n";
+          $result[] = "#OPTION-$value-$attributeId";
+        }
+      }
+      return $result;
+    }
+  }
+
+  public function getAttributeOptions($attributeId)
+  {
+    if (array_key_exists($attributeId, $this->attributeOptions)) {      
+      return $this->attributeOptions[$attributeId];
+    }
+
+    $attributeCode = $this->attributeCodesById[$attributeId];
+    $attribute = $this->attributes[$attributeCode];
+
+    $options = Mage::getResourceModel('eav/entity_attribute_option_collection')
+      ->setAttributeFilter($attributeId)
+      ->setStoreFilter(0, false)
+    ;
+
+    foreach($options as $option) {
+      $this->attributeOptions[$attributeId][$option->getOptionId()] = $option->getValue();
+    }
+
+    return $this->attributeOptions[$attributeId];
+  }
+
+  public function show($rows, $model = 'columns')
+  {
+
+    foreach($rows as $k => $row) {
+      if (is_array($row) && $k > 0) {
+        foreach($row as $attributeCode => $storeValues) {
+          foreach($storeValues as $storeCode => $storeValue) {
+            $max = $colmax[$attributeCode][$storeCode];
+            if (!$max) $max = 0;
+            $length = strlen($storeValue);
+            if ($length > $max) $colmax[$attributeCode][$storeCode] = $length;
+          }
+        }
+      }
+    }
+
+    $headers = array_shift($rows);
+
+    foreach($headers as $attributeCode => $storeValues) {
+      foreach($storeValues as $storeCode => $storeValue) {
+        $length = strlen($storeValue);            
+        $size = $colmax[$attributeCode][$storeCode] + 2;
+        if ($length > $size) {
+          $diff = $length - $size;              
+        } else {
+          $size = $size - $diff;
+          if ($size < 0) {
+            $diff = -$size;
+            $size = 0;
+          } else {
+            $diff = 0;
+          }
+        }
+        printf("%-{$size}s", $storeValue);
+      }
+    }
+
+    echo "\n";
+    foreach($rows as $row) {
+      if (is_array($row)) {
+        foreach($row as $attributeCode => $storeValues) {
+          foreach($storeValues as $storeCode => $storeValue) {
+            $size = $colmax[$attributeCode][$storeCode] + 2;
+            printf("%-{$size}s", $storeValue);
+          }
+        }
+      } else {
+        foreach($headers as $attributeCode => $storeValues) {
+          foreach($storeValues as $storeCode => $storeValue) {
+            $size = $colmax[$attributeCode][$storeCode] + 2;
+            printf("%-{$size}s", str_repeat('-', $size));
+          }
+        }            
+      }
+      echo "\n";
+    }    
+  }
+
+  public function checkId($id)
+  {
+    $conn = Mage::getSingleton('core/resource')->getConnection('core_read');
+    $query = <<<EOT
+SELECT entity_id, sku FROM {$this->entityTableName} WHERE entity_id = '$id' OR sku = '$id' LIMIT 1
+EOT;
+    $result = $conn->fetchRow($query);    
+    return array_values($result);
+  }
+
+  public function getExample()
+  {
+    $conn = Mage::getSingleton('core/resource')->getConnection('core_read');
+    $id = array();
+    $i = 0;
+    foreach(array('configurable', 'simple') as $typeId) {
+      $query = <<<EOT
+SELECT entity_id, sku, type_id FROM {$this->entityTableName} WHERE type_id = '$typeId' ORDER BY rand() LIMIT 1
+EOT;
+      $results = $conn->fetchAll($query);
+      foreach($results as $result) {
+        $idField = ($i++%2)?'sku':'entity_id';
+        $id = $result[$idField];
+        if ($typeId == 'configurable') $id .= '+';
+        $ex[] = $id;
+      }
+    }
+
+    return $ex;
+  }
+
+}
+
+$shell = new Miox_Shell_MagePov();
+$shell->run();
