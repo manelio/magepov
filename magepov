@@ -21,7 +21,7 @@ if (!$abstractPhp) {
 }
 
 if (!$abstractPhp) {
-  die('[EE] Not found a Magento installation. You have to run this script from a directory containing a Magento installation.\n');
+  die("[EE] Not found a Magento installation. You have to run this script from a directory containing a Magento installation.\n");
 }
 
 require_once( $abstractPhp );
